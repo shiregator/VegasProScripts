@@ -22,6 +22,7 @@ public class EntryPoint {
 
     String defaultBasePath = "Untitled_";
     const int QUICKTIME_MAX_FILE_NAME_LENGTH = 55;
+	String logfile = string.Format(@"C:\Users\{0}\Downloads\logfile.log", System.Environment.UserName);
 
     ScriptPortal.Vegas.Vegas myVegas = null;
 
@@ -30,6 +31,7 @@ public class EntryPoint {
         Project = 0,
         Selection,
         Regions,
+		TrackEvents,
     }
 
     ArrayList SelectedTemplates = new ArrayList();
@@ -37,6 +39,7 @@ public class EntryPoint {
     public void FromVegas(Vegas vegas)
     {
         myVegas = vegas;
+		File.Create(logfile).Close();		// Clear log file
 
         String projectPath = myVegas.Project.FilePath;
         if (String.IsNullOrEmpty(projectPath))
@@ -62,6 +65,10 @@ public class EntryPoint {
             {
                 renderMode = RenderMode.Regions;
             }
+			else if (RenderTrackEventsButton.Checked)
+			{
+				renderMode = RenderMode.TrackEvents;
+			}
             else if (RenderSelectionButton.Checked)
             {
                 renderMode = RenderMode.Selection;
@@ -81,9 +88,10 @@ public class EntryPoint {
 
         // make sure the output directory exists
         if (!Directory.Exists(outputDirectory))
-            throw new ApplicationException("The output directory does not exist.");
+            throw new ApplicationException("The output directory ("+outputDirectory+") does not exist.");
 
         List<RenderArgs> renders = new List<RenderArgs>();
+		List<String> editFileList = new List<String>();
 
         // enumerate through each selected render template
         foreach (RenderItem renderItem in selectedTemplates)
@@ -124,17 +132,88 @@ public class EntryPoint {
             if (RenderMode.Regions == renderMode) {
                 int regionIndex = 0;
                 foreach (ScriptPortal.Vegas.Region region in myVegas.Project.Regions) {
-                    String regionFilename = String.Format("{0}[{1}]{2}",
+                    String regionFilename = String.Format("{0}_Edit{1}{2}",
                                                           filename,
                                                           regionIndex.ToString(),
                                                           renderItem.Extension);
+
+					string mediaFile = "";
+					Hashtable mediaFiles = getMediaFiles();
+                    if ( mediaFiles.ContainsKey(region.Position) )
+                    {
+                        mediaFile = (string)mediaFiles[region.Position];
+                    }
+					else
+					{
+						String mediaFileStr = "";
+						foreach(DictionaryEntry mediaFilePosition in mediaFiles)
+						{
+							File.AppendAllText(logfile, DateTime.Now.ToString() + " ::: mediaFilePosition="+mediaFilePosition.Key+", " + mediaFilePosition.Value + "\n");
+							if( mediaFilePosition.Key.ToString().Equals(region.Position.ToString()) )
+							{
+								mediaFile = (string)mediaFilePosition.Value;
+								break;
+							}
+							else if( Math.Abs( ((ScriptPortal.Vegas.Timecode)mediaFilePosition.Key).ToMilliseconds() - region.Position.ToMilliseconds() ) < 30)
+							{
+								File.AppendAllText(logfile, DateTime.Now.ToString() + " ::: This has to be the one --> mediaFilePosition="+mediaFilePosition.Key+", " + mediaFilePosition.Value + "\n");
+							}
+						}
+
+						if(mediaFile.Equals(""))
+						{
+							String errorMessage = "Cannot find mediafile at region ("+regionIndex+"): region.Position = " + region.Position + " mediaFiles = " + mediaFileStr;
+							File.AppendAllText(logfile, DateTime.Now.ToString() + " ::: errorMessage="+errorMessage+"\n");
+							throw new ApplicationException(errorMessage);
+						}
+
+					}
+
+					int editIndex = 1;
+					regionFilename = mediaFile + "Edit" + editIndex.ToString() + renderItem.Extension;
+
+					while(editFileList.Contains(regionFilename))
+					{
+						File.AppendAllText(logfile, DateTime.Now.ToString() + " ::: fileList.Contains(regionFilename) (region("+regionIndex+").Position="+region.Position+", " +regionFilename +")\n");	
+						editIndex++;
+						regionFilename = mediaFile + "Edit" + editIndex.ToString() + renderItem.Extension;
+					}
+					File.AppendAllText(logfile, DateTime.Now.ToString() + " ::: Adding (region("+regionIndex+").Position="+region.Position+", " +regionFilename +")\n");
+
                     RenderArgs args = new RenderArgs();
                     args.OutputFile = regionFilename;
                     args.RenderTemplate = renderItem.Template;
                     args.Start = region.Position;
                     args.Length = region.Length;
                     renders.Add(args);
+					editFileList.Add(args.OutputFile);
                     regionIndex++;
+                }
+            }
+			else if (RenderMode.TrackEvents == renderMode) {
+                int trackEventIndex = 0;
+                foreach (ScriptPortal.Vegas.TrackEvent trackEvent in myVegas.Project.Tracks[0].Events) {
+					string mediaFile = getMediaFilename(trackEvent);
+
+					int editIndex = 1;
+					string trackEventFileName = mediaFile + "Edit" + editIndex.ToString() + renderItem.Extension;
+
+					while(editFileList.Contains(trackEventFileName))
+					{
+						File.AppendAllText(logfile, DateTime.Now.ToString() + " ::: fileList.Contains(trackEventFileName) (trackEvent("+trackEventIndex+").Start="+trackEvent.Start+", " +trackEventFileName +")\n");	
+						editIndex++;
+						trackEventFileName = mediaFile + "Edit" + editIndex.ToString() + renderItem.Extension;
+					}
+					File.AppendAllText(logfile, DateTime.Now.ToString() + " ::: Adding (trackEvent("+trackEventIndex+").Position="+trackEvent.Start+", " +trackEventFileName +")\n");
+
+                    RenderArgs args = new RenderArgs();
+                    args.OutputFile = trackEventFileName;
+                    args.RenderTemplate = renderItem.Template;
+                    args.Start = trackEvent.Start;
+                    args.Length = trackEvent.Length;
+                    renders.Add(args);
+					editFileList.Add(args.OutputFile);
+                    trackEventIndex++;
                 }
             } else {
                 filename += renderItem.Extension;
@@ -218,6 +297,38 @@ public class EntryPoint {
         }
     }
 
+	Hashtable getMediaFiles()
+	{
+		Hashtable mediaFiles = new Hashtable();
+		// Populate mediaFiles Hashtable with <Timecode start, media filePath>
+        foreach (ScriptPortal.Vegas.Track track in myVegas.Project.Tracks)
+        {
+            foreach (ScriptPortal.Vegas.TrackEvent trackEvent in track.Events)
+            {
+                if (!mediaFiles.ContainsKey(trackEvent.Start))
+                    mediaFiles.Add( trackEvent.Start, getMediaFilename(trackEvent) );
+            }
+        }
+
+		return mediaFiles;
+	}
+
+	string getMediaFilename(ScriptPortal.Vegas.TrackEvent trackEvent)
+	{
+		String mediaFilePath = "";
+		String mediaFileName = "";
+		foreach (ScriptPortal.Vegas.Take take in trackEvent.Takes)
+		{
+			if(mediaFilePath.Equals(""))
+				// Assumption here is that all takes in this event are from same directory
+				mediaFilePath = Path.GetDirectoryName(take.MediaPath);
+
+			mediaFileName += Path.GetFileNameWithoutExtension(take.MediaPath) + "_";
+		}
+
+		return Path.Combine(mediaFilePath, mediaFileName);
+	}
+
     class RenderItem
     {
         public readonly Renderer Renderer = null;
@@ -240,6 +351,7 @@ public class EntryPoint {
     RadioButton RenderProjectButton;
     RadioButton RenderRegionsButton;
     RadioButton RenderSelectionButton;
+	RadioButton RenderTrackEventsButton;
 
     DialogResult ShowBatchRenderDialog()
     {
@@ -263,7 +375,7 @@ public class EntryPoint {
         dlog.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
         dlog.MaximizeBox = false;
         dlog.StartPosition = FormStartPosition.CenterScreen;
-        dlog.Width = (int)(610 * dpiScale);
+        dlog.Width = (int)(750 * dpiScale);
         dlog.FormClosing += this.HandleFormClosing;
 
         int titleBarHeight = dlog.Height - dlog.ClientSize.Height;
@@ -308,7 +420,12 @@ public class EntryPoint {
                                               RenderSelectionButton.Right,
                                               buttonTop,
                                               (0 != myVegas.Project.Regions.Count));
-        RenderProjectButton.Checked = true;
+		RenderTrackEventsButton = AddRadioControl(dlog,
+                                              "Render All Track Events",
+                                              RenderRegionsButton.Right,
+                                              buttonTop,
+                                              (0 != myVegas.Project.Tracks[0].Events.Count));
+        RenderTrackEventsButton.Checked = true;
         
        int buttonRightGap = (int)(dpiScale*5);
 
